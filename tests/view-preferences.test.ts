@@ -118,3 +118,17 @@ it("retains host-wide widths and per-lane overrides, clamping stored widths", ()
     ).columnLayout,
   ).toBeUndefined();
 });
+
+it("remembers how projects with different groups are shown", () => {
+  const storage = (value: unknown) => ({
+    getItem: () => JSON.stringify(value),
+  });
+  expect(
+    loadViewPreferencesFrom(storage({ mixedGroups: "merged" }), "host")
+      .mixedGroups,
+  ).toBe("merged");
+  expect(
+    loadViewPreferencesFrom(storage({ mixedGroups: "other" }), "host")
+      .mixedGroups,
+  ).toBeUndefined();
+});

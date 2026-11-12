@@ -5,6 +5,7 @@ import { ExternalLink } from "@getpaseo/plugin/client/ui";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import {
   groupKind,
+  groupConfig,
   isTerminalGroup,
   priorityLabels,
   type Board,
@@ -149,7 +150,8 @@ export function TaskItem({
       ? t.childrenNotListedIdle
       : t.conversationReasons[card.conversationReason]
     : null;
-  const terminal = isTerminalGroup(card.stage, board.settings.groups);
+  const { groups } = groupConfig(board.settings, card.projectId);
+  const terminal = isTerminalGroup(card.stage, groups);
   const issue = [
     card.autoArchivePaused ? t.archivePaused : null,
     card.issue === "no-conversation" || card.issue === "conversation-unknown"
@@ -166,7 +168,7 @@ export function TaskItem({
       !card.managedLabels.includes(label) &&
       priorityLabels([label]).length === 0,
   );
-  const group = board.settings.groups.find((item) => item.id === card.stage);
+  const group = groups.find((item) => item.id === card.stage);
   const reasons = attentionReasons(card)
     .filter(
       (reason) =>
@@ -351,35 +353,30 @@ export function TaskItem({
           {isDraft ? t.edit : t.notes}
         </Text>
       </CardAction>
-      {isDraft &&
-        groupKind(card.stage, board.settings.groups) === "canceled" && (
-          <CardAction
-            theme={theme}
-            hint={t.archiveDraft}
-            accessibilityRole="button"
-            accessibilityLabel={t.archiveDraft}
-            disabled={disabled}
-            onPress={() => {
-              setActionsOpen(false);
-              onArchive();
-            }}
-            style={({ pressed }) => [
-              styles.iconAction,
-              styles.rowMenuAction,
-              { opacity: disabled ? 0.5 : 1 },
-              pressed && { backgroundColor: theme.colors.surface2 },
-            ]}
-          >
-            <Icon
-              name="Archive"
-              size={15}
-              color={theme.colors.foregroundMuted}
-            />
-            <Text style={[styles.cardMeta, { color: theme.colors.foreground }]}>
-              {t.archiveDraft}
-            </Text>
-          </CardAction>
-        )}
+      {isDraft && groupKind(card.stage, groups) === "canceled" && (
+        <CardAction
+          theme={theme}
+          hint={t.archiveDraft}
+          accessibilityRole="button"
+          accessibilityLabel={t.archiveDraft}
+          disabled={disabled}
+          onPress={() => {
+            setActionsOpen(false);
+            onArchive();
+          }}
+          style={({ pressed }) => [
+            styles.iconAction,
+            styles.rowMenuAction,
+            { opacity: disabled ? 0.5 : 1 },
+            pressed && { backgroundColor: theme.colors.surface2 },
+          ]}
+        >
+          <Icon name="Archive" size={15} color={theme.colors.foregroundMuted} />
+          <Text style={[styles.cardMeta, { color: theme.colors.foreground }]}>
+            {t.archiveDraft}
+          </Text>
+        </CardAction>
+      )}
     </View>
   );
   const primaryActions = (
@@ -389,7 +386,7 @@ export function TaskItem({
         hint={t.status}
         testID={`workboard-status-${card.id}`}
         accessibilityRole="button"
-        accessibilityLabel={`${t.status}: ${stageTitle(card.stage, board.settings.groups, t)} · ${card.title}`}
+        accessibilityLabel={`${t.status}: ${stageTitle(card.stage, groups, t)} · ${card.title}`}
         disabled={
           disabled || pending || card.binding !== null || card.archived !== null
         }
@@ -420,7 +417,7 @@ export function TaskItem({
             },
           ]}
         >
-          {stageTitle(card.stage, board.settings.groups, t)}
+          {stageTitle(card.stage, groups, t)}
         </Text>
         <Icon
           name="ChevronDown"

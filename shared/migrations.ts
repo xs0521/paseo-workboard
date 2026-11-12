@@ -382,6 +382,15 @@ export class InvalidStorageDataError extends Error {
 
 function migrateDataUnsafe(values: unknown, fromVersion: number) {
   if (fromVersion === DATA_SCHEMA_VERSION) return dataSchema.parse(values);
+  if (fromVersion === 13) {
+    const previous = z
+      .object({ ...dataSchema.shape, schemaVersion: z.literal(13) })
+      .parse(values);
+    return dataSchema.parse({
+      ...previous,
+      schemaVersion: DATA_SCHEMA_VERSION,
+    });
+  }
   if (fromVersion === 12) {
     const previous = z
       .object({

@@ -1,5 +1,9 @@
 import {
   cardsForStage,
+  groupConfig,
+  hasProjectGroups,
+  orderedGroups,
+  type Settings,
   type Card,
   type CardOrderByStage,
   type Group,
@@ -15,6 +19,7 @@ export function sortPriorityCards(cards: readonly Card[]): Card[] {
 
 export type TaskSection = {
   id: string;
+  projectId: string | null;
   title: string;
   cards: Card[];
   total: number;
@@ -25,6 +30,7 @@ export function taskSections(input: {
   cards: Card[];
   fullCards: Card[];
   groups: Group[];
+  groupsFor?(projectId: string | null): readonly Group[];
   cardOrderByStage: CardOrderByStage;
   projects: Board["projects"];
   unassigned: string;
@@ -36,24 +42,31 @@ export function taskSections(input: {
     input.projects.map((project) => [project.id, project.name]),
   );
   const counts = new Map<string, number>();
-  const stages = new Set(input.groups.map((group) => group.id));
+  const groupsOf = (projectId: string | null) =>
+    input.groupsFor?.(projectId) ?? input.groups;
   for (const card of input.fullCards) {
     if (
-      !stages.has(card.stage) ||
+      !groupsOf(card.projectId).some((group) => group.id === card.stage) ||
       card.archived?.status === "archived" ||
       card.archived?.status === "external"
     )
       continue;
     counts.set(key(card), (counts.get(key(card)) ?? 0) + 1);
   }
-  const ordered = input.groups.flatMap((group) =>
-    cardsForStage(input.cards, group.id, input.cardOrderByStage),
-  );
+  const ordered = [
+    ...new Set(input.cards.map((card) => card.projectId)),
+  ].flatMap((projectId) => {
+    const cards = input.cards.filter((card) => card.projectId === projectId);
+    return groupsOf(projectId).flatMap((group) =>
+      cardsForStage(cards, group.id, input.cardOrderByStage),
+    );
+  });
   for (const card of ordered) {
     const id = key(card);
     if (!sections.has(id))
       sections.set(id, {
         id,
+        projectId: card.projectId,
         title:
           (card.projectId !== null
             ? projectNames.get(card.projectId)
@@ -70,4 +83,36 @@ export function taskSections(input: {
     (a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id),
   );
   return values;
+}
+
+/** The distinct group lists behind a project selection; projects on the defaults share null. */
+export function visibleGroupScopes(
+  settings: Pick<Settings, "groups" | "groupOrder" | "projectGroups">,
+  projectIds: readonly string[],
+): (string | null)[] {
+  const ids = projectIds.length
+    ? projectIds.map((id) => (id === "none" ? null : id))
+    : [null, ...Object.keys(settings.projectGroups)];
+  return [
+    ...new Set(ids.map((id) => (hasProjectGroups(settings, id) ? id : null))),
+  ].sort((a, b) => (a === null ? -1 : b === null ? 1 : 0));
+}
+
+/**
+ * Display-only columns for several projects: groups sharing an ID share a column, titled by the
+ * first scope that holds it, with the defaults first. Stored groups are not changed.
+ */
+export function mergedGroups(
+  settings: Pick<Settings, "groups" | "groupOrder" | "projectGroups">,
+  scopes: readonly (string | null)[],
+): { groups: Group[]; owner: Map<string, string | null> } {
+  const groups: Group[] = [];
+  const owner = new Map<string, string | null>();
+  for (const scope of scopes)
+    for (const group of orderedGroups(groupConfig(settings, scope)))
+      if (!owner.has(group.id)) {
+        owner.set(group.id, scope);
+        groups.push(group);
+      }
+  return { groups, owner };
 }

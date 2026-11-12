@@ -599,7 +599,7 @@ it.each([9, 10, 11])(
       },
     };
     const migrated = migrateData(old, schemaVersion);
-    expect(migrated.schemaVersion).toBe(13);
+    expect(migrated.schemaVersion).toBe(DATA_SCHEMA_VERSION);
     expect(migrated.tasks[0].priority).toBe("p1");
     expect(migrated.tasks[0].mergedDrafts[0].priority).toBe("p3");
     expect(migrated.settings.priorityStyles).toMatchObject({

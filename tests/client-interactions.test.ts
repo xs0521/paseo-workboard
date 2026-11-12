@@ -410,7 +410,7 @@ it("F-07 filters conflicts and counts them separately from column tasks", () => 
     { ...card("conflict-a", "conflict"), projectId: "A" },
     { ...card("conflict-b", "conflict"), projectId: "B" },
   ]);
-  runtime.filters = { ...DEFAULT_FILTERS, projectId: "A" };
+  runtime.filters = { ...DEFAULT_FILTERS, projectIds: ["A"] };
   runtime.query.data.projects = [
     { id: "A", name: "A", directory: "/example/a", isGit: true },
     { id: "B", name: "B", directory: "/example/b", isGit: true },
@@ -424,7 +424,11 @@ it("F-07 filters conflicts and counts them separately from column tasks", () => 
 });
 
 it("X-10 keeps search immediate, merges same-tick filter updates, debounces storage and clears only search", () => {
-  runtime.filters = { ...DEFAULT_FILTERS, projectId: "A", activity: "running" };
+  runtime.filters = {
+    ...DEFAULT_FILTERS,
+    projectIds: ["A"],
+    activity: "running",
+  };
   runtime.query.data.projects = [{ id: "A", name: "A" }];
   const screen = host();
   let tree = screen.render();
@@ -444,7 +448,7 @@ it("X-10 keeps search immediate, merges same-tick filter updates, debounces stor
   byLabel(tree, (strings("zh") as any).clearSearch).props.onPress();
   tree = screen.render();
   expect(byLabel(tree, t.search).props.value).toBe("");
-  expect(named(tree, "ProjectPicker").props.value).toBe("A");
+  expect(named(tree, "ProjectPicker").props.value).toEqual(["A"]);
   const filtersToggle = byLabel(tree, t.filters);
   filtersToggle.props.onPress();
   expect(named(screen.render(), "FilterPanel").props.filters.activity).toBe(
@@ -3476,7 +3480,7 @@ it("bulk project folds persist and leave filtered-out projects unchanged", () =>
   ).toHaveLength(0);
   const reloaded = host();
   expect([
-    ...named(reloaded.render(), "ProjectBoardView").props.collapsed,
+    ...named(reloaded.render(), "ProjectBoardView").props.laneCollapsed,
   ]).toEqual(["project:id:p1", "project:id:p2"]);
   const props = named(screen.render(), "ProjectBoardView").props;
   const filtered = mount(ProjectBoardView, {
@@ -3488,7 +3492,7 @@ it("bulk project folds persist and leave filtered-out projects unchanged", () =>
     (e) => !!e.props.onPress && text(e) === t.expandAll,
   ).props.onPress();
   expect([
-    ...named(screen.render(), "ProjectBoardView").props.collapsed,
+    ...named(screen.render(), "ProjectBoardView").props.laneCollapsed,
   ]).toEqual(["project:id:p2"]);
   find(
     renderLanes(),
@@ -4155,7 +4159,7 @@ it("restores filters and all column widths without changing task data or other h
   vi.stubGlobal("window", { localStorage: storage });
   runtime.filters = {
     ...DEFAULT_FILTERS,
-    projectId: "none",
+    projectIds: ["none"],
     attentionOnly: true,
     activity: "running",
     changeRequest: "open",

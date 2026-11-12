@@ -17,7 +17,12 @@ import {
   labelKey,
   newTask,
   newestConflictStage,
+  allGroups,
+  groupConfig,
+  hasProjectGroups,
+  mapStage,
   orderedGroups,
+  withGroupConfig,
   resolveStage,
   resolvePriority,
   priorityLabels,
@@ -33,6 +38,7 @@ import {
   type ConversationDisplay,
   type ConversationGate,
   type ConversationReason,
+  type Group,
   type Settings,
   type Stage,
   type Task,
@@ -466,27 +472,28 @@ export class Workboard {
           (a) => a.workspaceId === task.workspaceId,
         );
         const activity = workspaceActivity(agents);
+        const { groups } = groupConfig(
+          data.settings,
+          workspace?.projectId ?? task.projectId,
+        );
         const stage = task.workspaceId
           ? workspace
             ? resolveStage(
                 workspace.labels,
-                data.settings.groups,
+                groups,
                 data.settings.defaultStartGroup,
               )
             : task.lastStage
           : task.draftStage;
         const archiveDelay = archiveDelayFor(
           data.settings,
-          groupKind(stage, data.settings.groups),
+          groupKind(stage, groups),
         );
         return {
           ...task,
           stage,
           labels: workspace?.labels ?? [],
-          managedLabels: statusLabels(
-            workspace?.labels ?? [],
-            data.settings.groups,
-          ),
+          managedLabels: statusLabels(workspace?.labels ?? [], groups),
           activity,
           changeRequest: projectChangeRequest(workspace),
           changeRequestUnavailable: !!workspace?.githubRuntime?.error,
@@ -554,13 +561,14 @@ export class Workboard {
         this.recheckHints.set(workspace.id, evidence.recheckAt);
       else this.recheckHints.delete(workspace.id);
       if (previous && this.archiveDeferrals.has(previous.id)) {
+        const { groups } = groupConfig(prior.settings, workspace.projectId);
         const kind = groupKind(
           resolveStage(
             workspace.labels,
-            prior.settings.groups,
+            groups,
             prior.settings.defaultStartGroup,
           ),
-          prior.settings.groups,
+          groups,
         );
         // A scheduled recheck keeps its own backoff: its gate is unknown by design, and
         // deferring again here would push the retry further out on every refresh. Its
@@ -615,6 +623,7 @@ export class Workboard {
       const decideExclusivity = data.exclusiveStatusLabelsPending;
       let hasStatusConflict = false;
       for (const workspace of inventory.workspaces) {
+        const { groups } = groupConfig(data.settings, workspace.projectId);
         let task = data.tasks.find((t) => t.workspaceId === workspace.id);
         const imported = !task;
         if (!task) {
@@ -623,10 +632,7 @@ export class Workboard {
               randomUUID(),
               workspace.name,
               this.stamp(),
-              defaultWorkspaceGroup(
-                data.settings.groups,
-                data.settings.defaultStartGroup,
-              ),
+              defaultWorkspaceGroup(groups, data.settings.defaultStartGroup),
             ),
             workspaceId: workspace.id,
           };
@@ -647,11 +653,11 @@ export class Workboard {
         if (!(task.binding?.target.kind === "new")) {
           const priority = resolvePriority(
             workspace.labels,
-            data.settings.groups.map((group) => group.label),
+            groups.map((group) => group.label),
           );
           const labels = priorityLabels(
             workspace.labels,
-            data.settings.groups.map((group) => group.label),
+            groups.map((group) => group.label),
           );
           if (!task.priorityWrite) {
             if (labels.length <= 1) task.priorityLabelBaseline = labels;
@@ -686,7 +692,7 @@ export class Workboard {
         const priorStage = imported ? null : task.lastStage;
         const stage = resolveStage(
           workspace.labels,
-          data.settings.groups,
+          groups,
           data.settings.defaultStartGroup,
         );
         if (stage === "conflict") hasStatusConflict = true;
@@ -719,14 +725,14 @@ export class Workboard {
           const newcomer = newestConflictStage(
             baseline,
             workspace.labels,
-            data.settings.groups,
+            groups,
           );
           if (newcomer)
             resolutions.push({
               taskId: task.id,
               workspaceId: task.workspaceId,
               stage: newcomer,
-              labels: statusLabels(workspace.labels, data.settings.groups),
+              labels: statusLabels(workspace.labels, groups),
             });
         }
         let observation = observations.get(workspace.id);
@@ -778,7 +784,7 @@ export class Workboard {
             status: "external",
             stage: task.lastStage,
             group:
-              data.settings.groups.find(
+              groupConfig(data.settings, task.projectId).groups.find(
                 (group) => group.id === task.lastStage,
               ) ?? null,
             startedAt: this.stamp(),
@@ -1148,16 +1154,13 @@ export class Workboard {
       !this.stopped && connection === this.connectionGeneration;
     const wantsPin = (workspace: Workspace) => {
       const settings = this.store.current.settings;
+      const { groups } = groupConfig(settings, workspace.projectId);
       return (
         settings.pinInProgressWorkspaces &&
         !workspace.archivingAt &&
         groupKind(
-          resolveStage(
-            workspace.labels,
-            settings.groups,
-            settings.defaultStartGroup,
-          ),
-          settings.groups,
+          resolveStage(workspace.labels, groups, settings.defaultStartGroup),
+          groups,
         ) === "in-progress"
       );
     };
@@ -1226,20 +1229,31 @@ export class Workboard {
     if (!unchanged(previous))
       throw new Error("Settings changed; refresh before saving");
     const next = settingsSchema.parse(settings);
-    if (
-      next.groups.some(
-        (group) =>
-          priorityLabels([group.label]).length > 0 &&
-          !previous.settings.groups.some(
-            (old) =>
-              old.id === group.id &&
-              labelKey(old.label) === labelKey(group.label),
-          ),
+    let removedDefault = false;
+    const scopes = new Set<string | null>([
+      null,
+      ...Object.keys(previous.settings.projectGroups),
+      ...Object.keys(next.projectGroups),
+      ...previous.tasks.map((task) => this.projectOf(task)),
+      ...this.inventory.workspaces.map((workspace) => workspace.projectId),
+    ]);
+    for (const scope of scopes) {
+      const before = groupConfig(previous.settings, scope).groups;
+      if (
+        groupConfig(next, scope).groups.some(
+          (group) =>
+            priorityLabels([group.label]).length > 0 &&
+            !before.some(
+              (old) =>
+                old.id === group.id &&
+                labelKey(old.label) === labelKey(group.label),
+            ),
+        )
       )
-    )
-      throw new Error(
-        "Priority labels are reserved; choose a different status label",
-      );
+        throw new Error(
+          "Priority labels are reserved; choose a different status label",
+        );
+    }
     if (
       next.defaultStartGroup &&
       isTerminalGroup(next.defaultStartGroup, next.groups)
@@ -1247,89 +1261,117 @@ export class Workboard {
       throw new Error("group-default-terminal");
     if (next.archiveDoneEnabled || next.archiveCanceledEnabled)
       next.archiveMappingNeedsReview = false;
-    const previousIds = previous.settings.groups.map((group) => group.id);
-    const nextIds = next.groups.map((group) => group.id);
-    const retained = nextIds.filter((id) => previousIds.includes(id));
-    if (
-      !sameOrder(
-        retained,
-        previousIds.filter((id) => nextIds.includes(id)),
-      )
-    )
-      throw new Error("Groups cannot be reordered here");
-    if (nextIds.slice(retained.length).some((id) => previousIds.includes(id)))
-      throw new Error("Groups cannot be reordered here");
-    if (!sameOrder(next.groupOrder, previous.settings.groupOrder))
-      throw new Error("Group order changed; refresh before saving");
-    next.groupOrder = previous.settings.groupOrder.length
-      ? orderedGroups({
-          groups: next.groups,
-          groupOrder: previous.settings.groupOrder,
-        }).map((group) => group.id)
-      : [];
-    const removed = previous.settings.groups.filter(
-      (group) => !next.groups.some((candidate) => candidate.id === group.id),
-    );
+    const removedIds = new Set<string>();
+    for (const scope of scopes) {
+      const old = groupConfig(previous.settings, scope);
+      const updated = groupConfig(next, scope);
+      // Resetting a project replaces its groups with the defaults, in the defaults' order.
+      const reset =
+        hasProjectGroups(previous.settings, scope) &&
+        !hasProjectGroups(next, scope);
+      // A project on the defaults follows the order they are given here.
+      const ownOrder = scope === null || hasProjectGroups(next, scope);
+      if (ownOrder && !reset) {
+        const previousIds = old.groups.map((group) => group.id);
+        const nextIds = updated.groups.map((group) => group.id);
+        const retained = nextIds.filter((id) => previousIds.includes(id));
+        if (
+          !sameOrder(
+            retained,
+            previousIds.filter((id) => nextIds.includes(id)),
+          )
+        )
+          throw new Error("Groups cannot be reordered here");
+        if (
+          nextIds.slice(retained.length).some((id) => previousIds.includes(id))
+        )
+          throw new Error("Groups cannot be reordered here");
+        if (!sameOrder(updated.groupOrder, old.groupOrder))
+          throw new Error("Group order changed; refresh before saving");
+        updated.groupOrder = old.groupOrder.length
+          ? orderedGroups({
+              groups: updated.groups,
+              groupOrder: old.groupOrder,
+            }).map((group) => group.id)
+          : [];
+        if (scope === null) next.groupOrder = updated.groupOrder;
+      }
+      const removed = old.groups.filter(
+        (group) =>
+          !updated.groups.some((candidate) => candidate.id === group.id),
+      );
+      for (const group of removed) removedIds.add(group.id);
+      if (scope === null)
+        for (const group of removed)
+          if (
+            group.id === defaultGroup(old.groups, next.defaultDraftGroup) ||
+            group.id ===
+              defaultWorkspaceGroup(old.groups, next.defaultStartGroup) ||
+            group.id === next.defaultStartWorkGroup
+          )
+            removedDefault = true;
+    }
     for (const task of previous.tasks.filter((task) => !hidden(task))) {
       if (task.binding) {
-        const oldGroup = previous.settings.groups.find(
+        const project = this.bindingProject(task, task.binding.target);
+        const oldGroup = groupConfig(previous.settings, project).groups.find(
           (group) => group.id === task.binding!.stage,
-        )!;
-        const newGroup = next.groups.find(
+        );
+        const newGroup = groupConfig(next, project).groups.find(
           (group) => group.id === task.binding!.stage,
         );
         if (
-          !newGroup ||
-          newGroup.kind !== oldGroup.kind ||
-          newGroup.label !== oldGroup.label
+          oldGroup &&
+          (!newGroup ||
+            newGroup.kind !== oldGroup.kind ||
+            newGroup.label !== oldGroup.label)
         )
           throw new Error(
             "A workspace binding still uses this group; finish binding first",
           );
       }
-      if (!task.workspaceId && !isDraftGroup(task.draftStage, next.groups))
+      const groups = groupConfig(next, task.projectId).groups;
+      if (!task.workspaceId && !isDraftGroup(task.draftStage, groups))
         throw new Error(
-          removed.some((group) => group.id === task.draftStage)
-            ? "group-tasks-in-use"
-            : "Move the drafts out before deleting this group or changing its type",
+          groups.some((group) => group.id === task.draftStage)
+            ? "Move the drafts out before deleting this group or changing its type"
+            : "group-tasks-in-use",
         );
     }
-    if (removed.length) {
+    if (removedIds.size) {
       const epoch = this.epoch;
       const inventory = await this.readInventory();
       if (epoch !== this.epoch || !this.connected)
         throw new Error("Workspaces changed; refresh before deleting a group");
-      for (const group of removed) {
-        const missingTasks = previous.tasks.some(
-          (task) =>
-            !hidden(task) &&
-            task.workspaceId &&
-            task.lastStage === group.id &&
-            !inventory.workspaces.some(
-              (workspace) => workspace.id === task.workspaceId,
-            ),
+      const removedLabels = (projectId: string | null) => {
+        const kept = groupConfig(next, projectId).groups;
+        return groupConfig(previous.settings, projectId).groups.filter(
+          (group) => !kept.some((candidate) => candidate.id === group.id),
         );
-        if (
-          missingTasks ||
-          inventory.workspaces.some((workspace) =>
+      };
+      const missingTasks = previous.tasks.some(
+        (task) =>
+          !hidden(task) &&
+          task.workspaceId &&
+          removedLabels(task.projectId).some(
+            (group) => group.id === task.lastStage,
+          ) &&
+          !inventory.workspaces.some(
+            (workspace) => workspace.id === task.workspaceId,
+          ),
+      );
+      if (
+        missingTasks ||
+        inventory.workspaces.some((workspace) =>
+          removedLabels(workspace.projectId).some((group) =>
             workspace.labels.some(
               (label) => labelKey(label) === labelKey(group.label),
             ),
-          )
+          ),
         )
-          throw new Error("group-tasks-in-use");
-        if (
-          group.id ===
-            defaultGroup(previous.settings.groups, next.defaultDraftGroup) ||
-          group.id ===
-            defaultWorkspaceGroup(
-              previous.settings.groups,
-              next.defaultStartGroup,
-            ) ||
-          group.id === next.defaultStartWorkGroup
-        )
-          throw new Error("group-default-in-use");
-      }
+      )
+        throw new Error("group-tasks-in-use");
+      if (removedDefault) throw new Error("group-default-in-use");
     }
     if (
       next.defaultStartWorkGroup &&
@@ -1348,18 +1390,43 @@ export class Workboard {
     await this.store.update((data) => {
       if (!unchanged(data))
         throw new Error("Settings changed; refresh before saving");
-      for (const group of removed) delete data.cardOrderByStage[group.id];
+      // Projects can share a stage ID; its saved order stays while any of them uses it.
+      const remaining = new Set(allGroups(next).map((group) => group.id));
+      for (const id of removedIds)
+        if (!remaining.has(id)) delete data.cardOrderByStage[id];
       data.settings = next;
       cleared = this.pruneArchiveDeferrals(data, this.inventory.workspaces);
     });
     for (const id of cleared) this.archiveDeferrals.delete(id);
-    return !isDeepStrictEqual(next.groups, previous.settings.groups);
+    return (
+      !isDeepStrictEqual(next.groups, previous.settings.groups) ||
+      !isDeepStrictEqual(next.projectGroups, previous.settings.projectGroups)
+    );
+  }
+  /** A task follows its live workspace's project, then its own stored project. */
+  private projectOf(task: Task): string | null {
+    return (
+      this.inventory.workspaces.find((w) => w.id === task.workspaceId)
+        ?.projectId ?? task.projectId
+    );
+  }
+  /** The project a pending workspace is expected to land in, before it can be observed. */
+  private bindingProject(
+    task: Task,
+    target: NonNullable<Task["binding"]>["target"],
+  ): string | null {
+    if (target.kind === "existing")
+      return (
+        this.inventory.workspaces.find((w) => w.id === target.workspaceId)
+          ?.projectId ?? task.projectId
+      );
+    return target.source.projectId ?? task.projectId;
   }
   private checkCardOrder(
     data: Data,
     input: Extract<Mutation, { action: "reorder-cards" | "reset-card-order" }>,
   ): void {
-    if (!data.settings.groups.some((group) => group.id === input.stage))
+    if (!allGroups(data.settings).some((group) => group.id === input.stage))
       throw new Error("Group no longer exists");
     const current = cardsForStage(
       this.snapshot(data).cards,
@@ -1397,9 +1464,11 @@ export class Workboard {
     >,
   ): void {
     if (input.expectedGroup) {
-      const group = data.settings.groups.find(
-        (group) => group.id === input.stage,
-      );
+      const task = data.tasks.find((task) => task.id === input.taskId);
+      const group = groupConfig(
+        data.settings,
+        task && this.projectOf(task),
+      ).groups.find((group) => group.id === input.stage);
       const expected = input.expectedGroup;
       if (
         !group ||
@@ -1446,13 +1515,14 @@ export class Workboard {
         throw new Error(this.error ?? "Paseo is disconnected");
       try {
         if (input.action === "create") {
+          const { groups } = groupConfig(
+            this.store.current.settings,
+            input.projectId,
+          );
           const stage =
             input.stage ??
-            defaultGroup(
-              this.store.current.settings.groups,
-              this.store.current.settings.defaultDraftGroup,
-            );
-          if (groupKind(stage, this.store.current.settings.groups) !== "todo")
+            defaultGroup(groups, this.store.current.settings.defaultDraftGroup);
+          if (groupKind(stage, groups) !== "todo")
             throw new Error("Choose a To do group for a new draft");
           await this.store.update((data) => {
             const task = newTask(
@@ -1489,24 +1559,29 @@ export class Workboard {
             else data.cardOrderByStage[input.stage] = input.cardOrder;
           });
         } else if (input.action === "reorder-groups") {
-          const current = orderedGroups(this.store.current.settings).map(
-            (group) => group.id,
+          const config = groupConfig(
+            this.store.current.settings,
+            input.projectId,
           );
-          const groups = this.store.current.settings.groups;
+          const current = orderedGroups(config).map((group) => group.id);
           if (!sameOrder(input.expectedGroupOrder, current))
             throw new Error("Group order changed; refresh before reordering");
           if (
-            input.groupOrder.length !== groups.length ||
+            input.groupOrder.length !== config.groups.length ||
             input.groupOrder.some(
-              (id) => !groups.some((group) => group.id === id),
+              (id) => !config.groups.some((group) => group.id === id),
             )
           )
             throw new Error("Group order is invalid");
           await this.store.update((data) => {
-            const fresh = orderedGroups(data.settings).map((group) => group.id);
+            const fresh = orderedGroups(
+              groupConfig(data.settings, input.projectId),
+            ).map((group) => group.id);
             if (!sameOrder(input.expectedGroupOrder, fresh))
               throw new Error("Group order changed; refresh before reordering");
-            data.settings.groupOrder = input.groupOrder;
+            data.settings = withGroupConfig(data.settings, input.projectId, {
+              groupOrder: input.groupOrder,
+            });
           });
         } else {
           const task = this.task(input.taskId);
@@ -1561,6 +1636,21 @@ export class Workboard {
                 throw new Error("Task changed; refresh before saving");
               if (!current.workspaceId) {
                 current.title = input.title;
+                const { groups: from } = groupConfig(
+                  data.settings,
+                  current.projectId,
+                );
+                const { groups: to } = groupConfig(
+                  data.settings,
+                  input.projectId,
+                );
+                const stage =
+                  mapStage(current.draftStage, from, to) ??
+                  defaultGroup(to, data.settings.defaultDraftGroup);
+                current.draftStage = stage;
+                current.lastStage = stage;
+                if (current.resolvedStage !== null)
+                  current.resolvedStage = stage;
                 current.projectId = input.projectId;
                 current.projectName =
                   this.inventory.projects.find((p) => p.id === input.projectId)
@@ -1572,27 +1662,48 @@ export class Workboard {
           } else if (input.action === "start") {
             if (!task.binding && task.workspaceId)
               throw new Error("Task already has a workspace");
+            const settings = this.store.current.settings;
+            const { groups } = groupConfig(
+              settings,
+              this.bindingProject(task, input.target),
+            );
             if (input.target.kind === "new")
-              this.checkPriorityTarget(task.priority ?? "p2");
-            const stage =
-              input.stage ??
-              task.binding?.stage ??
-              defaultStartWorkGroup(
-                this.store.current.settings.groups,
-                this.store.current.settings.defaultStartWorkGroup,
+              this.checkPriorityTarget(
+                task.priority ?? "p2",
+                undefined,
+                groups,
               );
+            // A selected group came from the task's project; the workspace may use another.
+            if (input.stage)
+              this.checkStageExpected(this.store.current, {
+                ...input,
+                stage: input.stage,
+              });
+            const selected =
+              input.stage &&
+              (!input.expectedGroup &&
+              groups.some((group) => group.id === input.stage)
+                ? input.stage
+                : mapStage(
+                    input.stage,
+                    groupConfig(settings, task.projectId).groups,
+                    groups,
+                  ));
+            const stage =
+              input.stage !== undefined
+                ? selected
+                : (task.binding?.stage ??
+                  defaultStartWorkGroup(
+                    groups,
+                    settings.defaultStartWorkGroup,
+                  ));
             if (!stage)
               throw new Error("Add an In progress group before starting work");
+            const expected = { ...input, stage: input.stage ?? stage };
             const check = () =>
-              this.checkStageExpected(this.store.current, { ...input, stage });
+              this.checkStageExpected(this.store.current, expected);
             check();
-            if (
-              !this.store.current.settings.groups.some(
-                (group) => group.id === stage,
-              )
-            )
-              throw new Error("Add an In progress group before starting work");
-            if (isDraftGroup(stage, this.store.current.settings.groups))
+            if (isDraftGroup(stage, groups))
               throw new Error(
                 "Choose a working or completed group for the workspace",
               );
@@ -1607,7 +1718,7 @@ export class Workboard {
               );
             if (!task.binding)
               await this.store.update((data) => {
-                this.checkStageExpected(data, { ...input, stage });
+                this.checkStageExpected(data, expected);
                 data.tasks.find((t) => t.id === task.id)!.binding = {
                   operationId: randomUUID(),
                   target: input.target,
@@ -1626,11 +1737,11 @@ export class Workboard {
                 this.checkStageExpected(this.store.current, input);
             };
             check();
-            if (
-              !this.store.current.settings.groups.some(
-                (group) => group.id === input.stage,
-              )
-            )
+            const { groups } = groupConfig(
+              this.store.current.settings,
+              this.projectOf(task),
+            );
+            if (!groups.some((group) => group.id === input.stage))
               throw new Error("Group no longer exists");
             if (task.binding)
               throw new Error("Workspace binding is still pending");
@@ -1660,9 +1771,7 @@ export class Workboard {
               });
               this.changed(workspace.id);
             } else {
-              if (
-                !isDraftGroup(input.stage, this.store.current.settings.groups)
-              )
+              if (!isDraftGroup(input.stage, groups))
                 throw new Error("Start work and bind a workspace first");
               await this.store.update((data) => {
                 const current = data.tasks.find((t) => t.id === task.id)!;
@@ -1676,8 +1785,10 @@ export class Workboard {
           } else if (input.action === "archive-draft") {
             if (
               task.workspaceId ||
-              groupKind(task.draftStage, this.store.current.settings.groups) !==
-                "canceled" ||
+              groupKind(
+                task.draftStage,
+                groupConfig(this.store.current.settings, task.projectId).groups,
+              ) !== "canceled" ||
               task.binding
             )
               throw new Error(
@@ -1690,7 +1801,7 @@ export class Workboard {
                 status: "archived",
                 stage: task.draftStage,
                 group:
-                  data.settings.groups.find(
+                  groupConfig(data.settings, task.projectId).groups.find(
                     (group) => group.id === task.draftStage,
                   ) ?? null,
                 startedAt: this.stamp(),
@@ -1793,15 +1904,15 @@ export class Workboard {
                 };
                 current.issue = null;
               } else {
-                if (
-                  !data.settings.groups.some(
-                    (group) => group.id === archive.stage,
-                  )
-                )
+                const { groups } = groupConfig(
+                  data.settings,
+                  current.projectId,
+                );
+                if (!groups.some((group) => group.id === archive.stage))
                   throw new Error("archive-group-unavailable");
                 if (
                   archive.kind === "draft" &&
-                  !isDraftGroup(archive.stage, data.settings.groups)
+                  !isDraftGroup(archive.stage, groups)
                 )
                   throw new Error("archive-draft-group-unavailable");
                 current.archived = null;
@@ -1851,8 +1962,16 @@ export class Workboard {
     this.bindingInFlight.add(binding.operationId);
     try {
       check();
+      const expectedGroups = groupConfig(
+        this.store.current.settings,
+        this.bindingProject(draft, binding.target),
+      ).groups;
       if (binding.target.kind === "new")
-        this.checkPriorityTarget(draft.priority ?? "p2");
+        this.checkPriorityTarget(
+          draft.priority ?? "p2",
+          undefined,
+          expectedGroups,
+        );
       const workspaceId =
         binding.workspaceId ??
         (binding.target.kind === "existing"
@@ -1864,6 +1983,14 @@ export class Workboard {
             ));
       const workspace = await this.host.workspace(workspaceId);
       if (!workspace) throw new Error("Binding workspace is unavailable");
+      const settings = this.store.current.settings;
+      const { groups } = groupConfig(settings, workspace.projectId);
+      // A directory source reveals its project only after the workspace exists.
+      const stage =
+        mapStage(binding.stage, expectedGroups, groups) ??
+        defaultStartWorkGroup(groups, settings.defaultStartWorkGroup);
+      if (!stage)
+        throw new Error("Add an In progress group before starting work");
       let survivorId = id;
       await this.store.update((data) => {
         check();
@@ -1882,7 +2009,7 @@ export class Workboard {
             mergedAt: this.stamp(),
             appendedText,
           });
-          imported.binding = { ...binding, workspaceId };
+          imported.binding = { ...binding, stage, workspaceId };
           imported.updatedAt = this.stamp(imported.updatedAt);
           survivorId = imported.id;
           data.tasks = data.tasks.filter((t) => t.id !== id);
@@ -1896,15 +2023,15 @@ export class Workboard {
           if (binding.target.kind === "existing" && !binding.workspaceId)
             current.description = `[${current.title}]\n${current.description}`;
           current.workspaceId = workspaceId;
-          current.binding = { ...binding, workspaceId };
+          current.binding = { ...binding, stage, workspaceId };
           current.updatedAt = this.stamp(current.updatedAt);
         }
       });
       try {
         await this.transition(
           workspaceId,
-          binding.stage,
-          statusLabels(workspace.labels, this.store.current.settings.groups),
+          stage,
+          statusLabels(workspace.labels, groups),
           check,
         );
         if (binding.target.kind === "new") {
@@ -1915,7 +2042,10 @@ export class Workboard {
             this.task(survivorId).priority ?? "p2",
             priorityLabels(
               fresh.labels,
-              this.store.current.settings.groups.map((group) => group.label),
+              groupConfig(
+                this.store.current.settings,
+                fresh.projectId,
+              ).groups.map((group) => group.label),
             ),
           );
         }
@@ -1933,8 +2063,8 @@ export class Workboard {
           // both stage fields with it, or an external label change arriving
           // before the next reconciliation would be attributed against the
           // survivor's stale stage and could delete the newer label.
-          task.lastStage = binding.stage;
-          task.resolvedStage = binding.stage;
+          task.lastStage = stage;
+          task.resolvedStage = stage;
           task.issue = null;
         });
       } catch (error) {
@@ -1948,12 +2078,9 @@ export class Workboard {
   private checkPriorityTarget(
     priority: Priority,
     target = PRIORITY_LABELS[priority],
+    groups: readonly Group[] = this.store.current.settings.groups,
   ): void {
-    if (
-      this.store.current.settings.groups.some(
-        (group) => labelKey(group.label) === labelKey(target),
-      )
-    )
+    if (groups.some((group) => labelKey(group.label) === labelKey(target)))
       throw new Error(
         "Priority label is used by a status group; rename its status label first",
       );
@@ -1965,14 +2092,16 @@ export class Workboard {
     check: () => void = () => {},
     target = PRIORITY_LABELS[priority],
   ): Promise<Workspace> {
-    this.checkPriorityTarget(priority, target);
-    const statusNames = this.store.current.settings.groups.map(
-      (group) => group.label,
-    );
     let workspace = await this.host.workspace(id);
     check();
     if (!workspace || workspace.archivingAt)
       throw new Error("Workspace is unavailable or archiving");
+    const { groups } = groupConfig(
+      this.store.current.settings,
+      workspace.projectId,
+    );
+    this.checkPriorityTarget(priority, target, groups);
+    const statusNames = groups.map((group) => group.label);
     if (!labelsEqual(priorityLabels(workspace.labels, statusNames), expected))
       throw new Error(
         "Workspace priority labels changed; refresh before saving",
@@ -2033,13 +2162,16 @@ export class Workboard {
     expected: string[],
     check: () => void = () => {},
   ): Promise<Workspace> {
-    const mapping = this.store.current.settings.groups;
-    const group = mapping.find((group) => group.id === stage);
-    if (!group) throw new Error("Group no longer exists");
     let workspace = await this.host.workspace(id);
     check();
     if (!workspace || workspace.archivingAt)
       throw new Error("Workspace is unavailable or archiving");
+    const { groups: mapping } = groupConfig(
+      this.store.current.settings,
+      workspace.projectId,
+    );
+    const group = mapping.find((group) => group.id === stage);
+    if (!group) throw new Error("Group no longer exists");
     if (!labelsEqual(statusLabels(workspace.labels, mapping), expected))
       throw new Error(
         "Workspace labels changed; refresh before changing stage",
@@ -2162,14 +2294,18 @@ export class Workboard {
       const workspace = workspaces.find(
         (workspace) => workspace.id === task.workspaceId,
       );
+      const { groups } = groupConfig(
+        data.settings,
+        workspace?.projectId ?? task.projectId,
+      );
       const stage = workspace
         ? resolveStage(
             workspace.labels,
-            data.settings.groups,
+            groups,
             data.settings.defaultStartGroup,
           )
         : task.lastStage;
-      const kind = groupKind(stage, data.settings.groups);
+      const kind = groupKind(stage, groups);
       const delay = archiveDelayFor(data.settings, kind);
       // An idle task's scheduled recheck time stands in for the unknown stored gate when
       // judging applicability; it only ever clears a deferral, never authorizes an archive.
@@ -2208,7 +2344,7 @@ export class Workboard {
     )
       throw new Error("archive-resolution-unavailable");
     if (
-      !this.store.current.settings.groups.some(
+      !groupConfig(this.store.current.settings, task.projectId).groups.some(
         (group) => group.id === archive.stage,
       )
     )
@@ -2266,7 +2402,7 @@ export class Workboard {
         current.autoArchivePaused = true;
         current.lastStage = resolveStage(
           workspace.labels,
-          data.settings.groups,
+          groupConfig(data.settings, workspace.projectId).groups,
           data.settings.defaultStartGroup,
         );
         current.resolvedStage =
@@ -2326,7 +2462,10 @@ export class Workboard {
     const settings = this.store.current.settings;
     const candidates = tasks.filter((task) => {
       const id = task.workspaceId;
-      const kind = groupKind(task.lastStage, settings.groups);
+      const kind = groupKind(
+        task.lastStage,
+        groupConfig(settings, this.projectOf(task)).groups,
+      );
       return (
         id &&
         (!scope || scope.has(id)) &&
@@ -2367,9 +2506,13 @@ export class Workboard {
         );
         continue;
       }
+      const { groups } = groupConfig(
+        this.store.current.settings,
+        workspace.projectId,
+      );
       const stage = resolveStage(
         workspace.labels,
-        this.store.current.settings.groups,
+        groups,
         this.store.current.settings.defaultStartGroup,
       );
       let agents: readonly Agent[] = inventory.agents.filter(
@@ -2405,12 +2548,12 @@ export class Workboard {
       }
       if (
         !isArchiveDue(
-          groupKind(stage, this.store.current.settings.groups),
+          groupKind(stage, groups),
           gate,
           this.now(),
           archiveDelayFor(
             this.store.current.settings,
-            groupKind(stage, this.store.current.settings.groups),
+            groupKind(stage, groups),
           ),
         )
       ) {
@@ -2443,7 +2586,9 @@ export class Workboard {
             status: "pending",
             stage,
             group:
-              data.settings.groups.find((group) => group.id === stage) ?? null,
+              groupConfig(data.settings, workspace.projectId).groups.find(
+                (group) => group.id === stage,
+              ) ?? null,
             startedAt: this.stamp(),
             archivedAt: null,
             lastConversationAt: candidate.lastConversationAt,
@@ -2468,7 +2613,7 @@ export class Workboard {
           current.status === "needs_input" ||
           resolveStage(
             current.labels,
-            this.store.current.settings.groups,
+            groupConfig(this.store.current.settings, current.projectId).groups,
             this.store.current.settings.defaultStartGroup,
           ) !== stage ||
           !labelsEqual(current.labels, workspace.labels) ||

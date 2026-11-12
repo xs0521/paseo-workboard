@@ -393,6 +393,223 @@ for (const view of ["Board", "List"] as const) {
   });
 }
 
+test("merges project columns and keeps each lane's own groups", async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const runId = Date.now();
+  const projects = [`ui-custom-${runId}`, `ui-default-${runId}`];
+  for (const projectId of projects)
+    await client.invokePluginRpc(pluginId, "workboard.mutate", {
+      action: "create",
+      title: `Project example ${projectId}`,
+      description: "",
+      projectId,
+    });
+  const before = await snapshot();
+  const name = `QA ${runId}`;
+  await client.invokePluginRpc(pluginId, "workboard.mutate", {
+    action: "settings",
+    revision: before.revision,
+    expectedSettings: before.settings,
+    settings: {
+      ...before.settings,
+      projectGroups: {
+        [projects[0]]: {
+          groups: [
+            ...before.settings.groups,
+            { id: "qa", name, kind: "review", label: `task:qa-${runId}` },
+          ],
+          groupOrder: before.settings.groupOrder,
+        },
+      },
+    },
+  });
+  try {
+    await openWorkboard(page);
+    await page.getByTestId("workboard-view-board").click();
+    const custom = page.getByTestId(
+      `workboard-project-lane-project:id:${projects[0]}`,
+    );
+    const inherited = page.getByTestId(
+      `workboard-project-lane-project:id:${projects[1]}`,
+    );
+    // Sections by project remain the default for differing groups.
+    for (const view of ["board", "list"]) {
+      await page.getByTestId(`workboard-view-${view}`).click();
+      await expect(custom.getByText(name).first()).toBeVisible();
+      await expect(inherited).toBeVisible();
+      await expect(inherited.getByText(name)).toHaveCount(0);
+    }
+    await page.getByTestId("workboard-view-board").click();
+    await page.getByTestId("workboard-mixed-groups-menu").click();
+    await page
+      .getByRole("radio", { name: "Merged groups", exact: true })
+      .click();
+    await expect(page.getByTestId("workboard-column-qa")).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid^="workboard-project-lane-"]'),
+    ).toHaveCount(0);
+    await page.getByTestId("workboard-view-list").click();
+    await expect(page.getByText(name).first()).toBeVisible();
+    await expect(
+      page.locator('[data-testid^="workboard-project-lane-"]'),
+    ).toHaveCount(0);
+    await page.getByTestId("workboard-mixed-groups-menu").click();
+    await page
+      .getByRole("radio", { name: "Sections by project", exact: true })
+      .click();
+    await expect(inherited).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  } finally {
+    const after = await snapshot();
+    await client.invokePluginRpc(pluginId, "workboard.mutate", {
+      action: "settings",
+      revision: after.revision,
+      expectedSettings: after.settings,
+      settings: { ...after.settings, projectGroups: {} },
+    });
+  }
+});
+
+test("saves a new group to the checked projects from the group dialog", async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openWorkboard(page);
+  const projects = (await snapshot()).projects;
+  expect(projects.length).toBeGreaterThan(0);
+  const target = projects[0];
+  const runId = Date.now();
+  const name = `Shared review ${runId}`;
+  await page
+    .getByRole("button", { name: "Settings", exact: true })
+    .last()
+    .click();
+  await page.getByRole("button", { name: "Add group", exact: true }).click();
+  await page.getByRole("textbox", { name: "Group name" }).fill(name);
+  await page
+    .getByRole("textbox", { name: "Workspace label" })
+    .fill(`task:shared-${runId}`);
+  await page
+    .getByRole("checkbox", { name: "Apply to: Default groups", exact: true })
+    .click();
+  await page
+    .getByRole("checkbox", { name: `Apply to: ${target.name}`, exact: true })
+    .click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect
+    .poll(
+      async () =>
+        (await snapshot()).settings.projectGroups[target.id]?.groups.some(
+          (group) => group.name === name,
+        ) ?? false,
+    )
+    .toBe(true);
+  const after = await snapshot();
+  expect(after.settings.groups.some((group) => group.name === name)).toBe(
+    false,
+  );
+  await client.invokePluginRpc(pluginId, "workboard.mutate", {
+    action: "settings",
+    revision: after.revision,
+    expectedSettings: after.settings,
+    settings: { ...after.settings, projectGroups: {} },
+  });
+  expect(pageErrors).toEqual([]);
+});
+
+test("reopened group dialog shows the projects chosen before", async ({
+  page,
+}) => {
+  await openWorkboard(page);
+  const initial = await snapshot();
+  expect(initial.projects.length).toBeGreaterThan(0);
+  const target = initial.projects[0];
+  const name = `Scoped group ${Date.now()}`;
+  await page
+    .getByRole("button", { name: "Settings", exact: true })
+    .last()
+    .click();
+  await page.getByRole("button", { name: "Add group", exact: true }).click();
+  await page.getByRole("textbox", { name: "Group name" }).fill(name);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const edit = page.getByRole("button", { name: `Edit group: ${name}` });
+  const box = page.getByRole("checkbox", {
+    name: `Apply to: ${target.name}`,
+    exact: true,
+  });
+  await edit.click();
+  await expect(box).toBeChecked();
+  await box.click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(box).toHaveCount(0);
+  await edit.click();
+  await expect(box).not.toBeChecked();
+  await expect(
+    page.getByRole("checkbox", {
+      name: "Apply to: Default groups",
+      exact: true,
+    }),
+  ).toBeChecked();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  const after = await snapshot();
+  expect(
+    after.settings.projectGroups[target.id].groups.some(
+      (group) => group.name === name,
+    ),
+  ).toBe(false);
+  await client.invokePluginRpc(pluginId, "workboard.mutate", {
+    action: "settings",
+    revision: after.revision,
+    expectedSettings: after.settings,
+    settings: {
+      ...after.settings,
+      groups: after.settings.groups.filter((group) => group.name !== name),
+      projectGroups: {},
+    },
+  });
+});
+
+test("filters the board by several projects at once", async ({ page }) => {
+  await openWorkboard(page);
+  const runId = Date.now();
+  const projects = (await snapshot()).projects;
+  expect(projects.length).toBeGreaterThan(0);
+  const loose = `Unassigned filter example ${runId}`;
+  await client.invokePluginRpc(pluginId, "workboard.mutate", {
+    action: "create",
+    title: loose,
+    description: "",
+    projectId: null,
+  });
+  const listed = (await snapshot()).cards.find(
+    (card) => card.projectId === projects[0].id,
+  );
+  const picker = page.getByRole("button", { name: /^Select project:/ });
+  await picker.click();
+  await page.getByTestId("workboard-project-option-none").click();
+  await page.getByTestId(`workboard-project-option-${projects[0].id}`).click();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveAccessibleName("Select project: 2 projects");
+  await expect(page.getByText(loose, { exact: true }).first()).toBeVisible();
+  if (listed)
+    await expect(
+      page.getByText(listed.title, { exact: true }).first(),
+    ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Select project: 2 projects" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /^Select project:/ }).click();
+  await page.getByTestId("workboard-project-option-all").click();
+  await expect(
+    page.getByRole("button", { name: "Select project: All projects" }),
+  ).toBeVisible();
+});
+
 test("keeps archive delays visible while disabled and Cancel leaves the rule off", async ({
   page,
 }) => {

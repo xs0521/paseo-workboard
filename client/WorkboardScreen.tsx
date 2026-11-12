@@ -23,7 +23,11 @@ import {
   defaultStartWorkGroup,
   isDraftGroup,
   isTerminalGroup,
+  groupConfig,
+  mapStage,
   orderedGroups,
+  withGroupConfig,
+  withoutProjectGroups,
   priorityLabels,
   type Board,
   type Card,
@@ -45,13 +49,15 @@ import {
   shortDate,
   visibleCards,
   withOptimisticStages,
+  cardsInGroupScope,
 } from "./board-utils";
 import { groupTitle, stageTitle, strings } from "./strings";
 import { GroupEditor, GroupSettings, newGroup } from "./GroupSettings";
 import { PrioritySettings } from "./PrioritySettings";
 import { BoardView } from "./BoardView";
 import { ListView } from "./ListView";
-import { ProjectBoardView } from "./ProjectBoardView";
+import { mergedGroups, visibleGroupScopes } from "./project-groups";
+import { ProjectBoardView, type GroupScopeProps } from "./ProjectBoardView";
 import { ToolbarSelect } from "./ToolbarSelect";
 import { TaskItem } from "./TaskItem";
 export { TaskItem as TaskCard } from "./TaskItem";
@@ -66,6 +72,7 @@ import {
   activeFilterCount,
   DEFAULT_FILTERS,
   type BoardFilters,
+  singleProject,
 } from "./filters";
 import { FilterPanel } from "./FilterPanel";
 import { QuickCreate } from "./QuickCreate";
@@ -88,10 +95,16 @@ type MoveUndo = {
   card: Card;
   expiresAt: number;
 };
-const sameGroup = (board: Board | undefined, group: MoveUndo["group"]) => {
-  const current = board?.settings.groups.find(
-    (current) => current.id === group.id,
-  );
+const sameGroup = (
+  board: Board | undefined,
+  group: MoveUndo["group"],
+  projectId: string | null,
+) => {
+  const current =
+    board &&
+    groupConfig(board.settings, projectId).groups.find(
+      (current) => current.id === group.id,
+    );
   return (
     !!current && current.kind === group.kind && current.label === group.label
   );
@@ -137,7 +150,8 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     Record<string, { title: string; error: boolean }>
   >({});
   const [latestMoveUndoId, setLatestMoveUndoId] = useState<string | null>(null);
-  const { projectId, search, attentionOnly } = filters;
+  const { projectIds, search, attentionOnly } = filters;
+  const projectId = singleProject(projectIds);
   const [selectedStage, setSelectedStage] = useState<Stage | null>(null);
   const [draft, setDraft] = useState<DraftForm>(null);
   const [starting, setStarting] = useState<StartForm>(null);
@@ -163,9 +177,13 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
   const [optimisticCardOrders, setOptimisticCardOrders] = useState<
     Record<string, string[]>
   >({});
-  const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
+  const [optimisticOrder, setOptimisticOrder] = useState<{
+    projectId: string | null;
+    order: string[];
+  } | null>(null);
   const [editingGroup, setEditingGroup] = useState<{
     group: Group;
+    projectId: string | null;
     settings: Settings;
     revision: number;
   } | null>(null);
@@ -224,7 +242,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
           [...current].filter(
             ([id, undo]) =>
               undo.expiresAt > Date.now() &&
-              sameGroup(liveBoard.current, undo.group) &&
+              sameGroup(liveBoard.current, undo.group, undo.card.projectId) &&
               sameCard(
                 liveBoard.current?.cards.find((card) => card.id === id),
                 undo.card,
@@ -262,14 +280,20 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     [persistFilters],
   );
   useEffect(() => {
-    if (
-      serverBoard?.connected &&
-      projectId !== "all" &&
-      projectId !== "none" &&
-      !serverBoard.projects.some((project) => project.id === projectId)
-    )
-      updateFilters({ projectId: "all" });
-  }, [projectId, serverBoard?.connected, serverBoard?.projects, updateFilters]);
+    if (!serverBoard?.connected) return;
+    const known = projectIds.filter(
+      (id) =>
+        id === "none" ||
+        serverBoard.projects.some((project) => project.id === id),
+    );
+    if (known.length !== projectIds.length)
+      updateFilters({ projectIds: known });
+  }, [
+    projectIds,
+    serverBoard?.connected,
+    serverBoard?.projects,
+    updateFilters,
+  ]);
   writeEligible.current =
     !!serverBoard?.connected &&
     !boardQuery.isError &&
@@ -332,7 +356,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     },
     optimisticStages,
   );
-  const cards = visibleCards(board, projectId, search, attentionOnly, filters);
+  const cards = visibleCards(board, projectIds, search, attentionOnly, filters);
   const filterCount = activeFilterCount(filters);
   const hasActiveFilter = filterCount > 0;
   const allCards = visibleCards(board, "all", "", false);
@@ -385,23 +409,26 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
       />
     );
   const openStatus = (card: Card) =>
-    setStatusSelection({ card, groups: orderedGroups(board.settings) });
+    setStatusSelection({
+      card,
+      groups: orderedGroups(groupConfig(board.settings, card.projectId)),
+    });
   const setStage = async (card: Card, stage: Stage, expectedGroup?: Group) => {
     if (mutationPending.current.has(`stage:${card.id}`)) {
       toast.error(t.mutationPending);
       return false;
     }
-    const group =
-      expectedGroup ??
-      board.settings.groups.find((group) => group.id === stage);
-    if (expectedGroup && !sameGroup(board, expectedGroup)) {
+    const { groups } = groupConfig(board.settings, card.projectId);
+    const group = expectedGroup ?? groups.find((group) => group.id === stage);
+    if (expectedGroup && !sameGroup(board, expectedGroup, card.projectId)) {
       toast.error(t.mutationErrors["stage-group-changed"]);
       return false;
     }
-    if (
-      card.workspaceId === null &&
-      !isDraftGroup(stage, board.settings.groups)
-    ) {
+    if (!groups.some((group) => group.id === stage)) {
+      toast.show(t.groupNotInProject, { variant: "warning" });
+      return false;
+    }
+    if (card.workspaceId === null && !isDraftGroup(stage, groups)) {
       setStatusSelection(null);
       setStarting({ card, stage, expectedGroup: group });
       return false;
@@ -432,9 +459,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     if (next) {
       setStatusSelection(null);
       const moved = next.cards.find((item) => item.id === card.id);
-      const originalGroup = board.settings.groups.find(
-        (group) => group.id === card.stage,
-      );
+      const originalGroup = groups.find((group) => group.id === card.stage);
       if (
         moved &&
         moved.stage === stage &&
@@ -467,7 +492,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
       !undo ||
       undo.expiresAt <= Date.now() ||
       !sameCard(card, undo.card) ||
-      !sameGroup(liveBoard.current, undo.group)
+      !sameGroup(liveBoard.current, undo.group, undo.card.projectId)
     ) {
       toast.error(t.undoMoveExpired);
       return;
@@ -513,18 +538,20 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     if (!next) void boardQuery.refetch();
     return !!next;
   };
-  const editGroup = (group: Group) =>
+  const editGroup = (group: Group, projectId: string | null) =>
     setEditingGroup({
       group,
+      projectId,
       settings: board.settings,
       revision: board.revision,
     });
-  const deleteReason = (group: Group) => {
+  const deleteReason = (group: Group, scope: string | null) => {
     const reason = groupDeleteReason(
-      board.cards,
-      board.settings.groups,
+      cardsInGroupScope(board.cards, board.settings, scope),
+      groupConfig(board.settings, scope).groups,
       group,
-      board.settings,
+      scope ? undefined : board.settings,
+      !!scope,
     );
     return reason ? t[reason] : null;
   };
@@ -532,7 +559,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
     setDraft({
       title: "",
       description: "",
-      projectId: projectId === "all" || projectId === "none" ? null : projectId,
+      projectId,
     });
   const clearFilters = () => updateFilters(DEFAULT_FILTERS);
   const setAllColumnWidths = (width: number) =>
@@ -554,7 +581,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
         );
     const hidden =
       saved &&
-      !visibleCards(next, projectId, search, attentionOnly, filters).some(
+      !visibleCards(next, projectIds, search, attentionOnly, filters).some(
         (card) => card.id === saved.id,
       );
     const message = editedId
@@ -571,14 +598,94 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
       durationMs: hidden ? 6000 : 2500,
     });
   };
+  // Status columns only line up across projects while every project uses the defaults.
+  // Projects with different groups share one board; columns merge by group ID for display.
+  const scopes = visibleGroupScopes(board.settings, projectIds);
+  const mixed = scopes.length > 1;
+  const sections = mixed && viewPreferences.mixedGroups !== "merged";
   const projectBoard =
-    viewPreferences.mode === "board" && viewPreferences.groupBy === "project";
-  const TaskView =
-    viewPreferences.mode === "list"
+    viewPreferences.mode === "board" &&
+    (viewPreferences.groupBy === "project" || sections);
+  const projectSections = projectBoard || sections;
+  const merged =
+    mixed && !projectSections ? mergedGroups(board.settings, scopes) : null;
+  const TaskView = projectSections
+    ? ProjectBoardView
+    : viewPreferences.mode === "list"
       ? ListView
-      : projectBoard
-        ? ProjectBoardView
-        : BoardView;
+      : BoardView;
+  const viewScope = merged ? null : (scopes[0] ?? null);
+  const mergedScope = (
+    groups: Group[],
+    owner: Map<string, string | null>,
+  ): GroupScopeProps => ({
+    groups,
+    stage:
+      groups.find((group) => group.id === selectedStage)?.id ??
+      defaultWorkspaceGroup(groups, board.settings.defaultStartGroup),
+    onReorder: async () => {
+      toast.show(t.mergedGroupsReorder, { variant: "warning" });
+      return false;
+    },
+    // A merged column edits the group where it lives; Apply to shows every project holding it.
+    onEdit: (group) => editGroup(group, owner.get(group.id) ?? null),
+    onAdd: () => editGroup(newGroup(groups), null),
+    deleteReason: () => t.mergedGroupsDelete,
+    onDelete: async () => {
+      toast.show(t.mergedGroupsDelete, { variant: "warning" });
+      return false;
+    },
+  });
+  const groupScope = (scope: string | null): GroupScopeProps => {
+    const config = groupConfig(board.settings, scope);
+    return {
+      groups: orderedGroups({
+        ...config,
+        groupOrder:
+          optimisticOrder?.projectId === scope
+            ? optimisticOrder.order
+            : config.groupOrder,
+      }),
+      stage:
+        config.groups.find((group) => group.id === selectedStage)?.id ??
+        defaultWorkspaceGroup(config.groups, board.settings.defaultStartGroup),
+      onReorder: async (groupOrder, expectedGroupOrder) => {
+        if (mutationPending.current.has("reorder-groups")) {
+          toast.error(t.mutationPending);
+          return false;
+        }
+        setOptimisticOrder({ projectId: scope, order: groupOrder });
+        const next = await mutate({
+          action: "reorder-groups",
+          projectId: scope,
+          groupOrder,
+          expectedGroupOrder,
+        });
+        setOptimisticOrder(null);
+        if (next)
+          toast.show(t.layoutSaved, { variant: "success", durationMs: 1600 });
+        return !!next;
+      },
+      onEdit: (group) => editGroup(group, scope),
+      onAdd: () => editGroup(newGroup(config.groups), scope),
+      deleteReason: (group) => deleteReason(group, scope),
+      onDelete: async (group) => {
+        const reason = deleteReason(group, scope);
+        if (reason) {
+          toast.show(reason, { variant: "warning" });
+          return false;
+        }
+        return !!(await mutate({
+          action: "settings",
+          revision: board.revision,
+          expectedSettings: board.settings,
+          settings: withGroupConfig(board.settings, scope, {
+            groups: config.groups.filter((item) => item.id !== group.id),
+          }),
+        }));
+      },
+    };
+  };
   const sortControl = (
     <ToolbarSelect
       id="workboard-sort-menu"
@@ -686,8 +793,8 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
           </Pressable>
           <ProjectPicker
             board={board}
-            value={projectId}
-            setValue={(projectId) => updateFilters({ projectId })}
+            value={projectIds}
+            setValue={(projectIds) => updateFilters({ projectIds })}
             t={t}
             theme={props.theme}
             compact={toolbarCompact}
@@ -775,19 +882,35 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
               </Pressable>
             ))}
           </View>
+          {mixed && (
+            <ToolbarSelect
+              id="workboard-mixed-groups-menu"
+              title={t.mixedGroups}
+              label={sections ? t.mixedGroupsSections : t.mixedGroupsMerged}
+              value={sections ? "sections" : "merged"}
+              options={[
+                { value: "sections", label: t.mixedGroupsSections },
+                { value: "merged", label: t.mixedGroupsMerged },
+              ]}
+              onSelect={(value) =>
+                updateViewPreferences({
+                  mixedGroups: value === "merged" ? "merged" : "sections",
+                })
+              }
+              theme={props.theme}
+            />
+          )}
           {viewPreferences.mode === "board" && (
             <View style={styles.boardDisplayControls}>
               <ToolbarSelect
                 id="workboard-group-menu"
                 title={t.grouping}
-                label={
-                  viewPreferences.groupBy === "project"
-                    ? t.projectGrouping
-                    : t.statusGrouping
-                }
-                value={viewPreferences.groupBy ?? "status"}
+                label={projectBoard ? t.projectGrouping : t.statusGrouping}
+                value={projectBoard ? "project" : "status"}
                 options={[
-                  { value: "status", label: t.groupByStatus },
+                  ...(sections
+                    ? []
+                    : [{ value: "status", label: t.groupByStatus }]),
                   { value: "project", label: t.groupByProject },
                 ]}
                 onSelect={(groupBy) =>
@@ -996,7 +1119,11 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
               .replace("{task}", latestMove.card.title)
               .replace(
                 "{group}",
-                stageTitle(latestMove.card.stage, board.settings.groups, t),
+                stageTitle(
+                  latestMove.card.stage,
+                  groupConfig(board.settings, latestMove.card.projectId).groups,
+                  t,
+                ),
               )}
           </Text>
           <Pressable
@@ -1173,6 +1300,8 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
       )}
       <TaskView
         projects={board.projects}
+        list={viewPreferences.mode === "list"}
+        groupScope={groupScope}
         onCreateInProject={
           writesDisabled
             ? undefined
@@ -1185,19 +1314,13 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
             : undefined
         }
         priorityFirst={viewPreferences.priorityFirst ?? true}
-        collapsed={
-          new Set(
-            projectBoard
-              ? (viewPreferences.collapsedProjectGroups ?? [])
-              : viewPreferences.collapsedListGroups,
-          )
-        }
+        collapsed={new Set(viewPreferences.collapsedListGroups)}
         onCollapsedChange={(ids) =>
-          updateViewPreferences(
-            projectBoard
-              ? { collapsedProjectGroups: ids }
-              : { collapsedListGroups: ids },
-          )
+          updateViewPreferences({ collapsedListGroups: ids })
+        }
+        laneCollapsed={new Set(viewPreferences.collapsedProjectGroups ?? [])}
+        onLaneCollapsedChange={(ids) =>
+          updateViewPreferences({ collapsedProjectGroups: ids })
         }
         quickCreateErrors={
           new Set(
@@ -1254,7 +1377,10 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
         onClearFilters={clearFilters}
         onCreateTask={writesDisabled ? undefined : createTask}
         renderQuickCreate={(group) =>
-          group.kind === "todo" ? (
+          group.kind === "todo" &&
+          groupConfig(board.settings, projectId).groups.some(
+            (item) => item.id === group.id,
+          ) ? (
             <QuickCreate
               key={group.id}
               disabled={writesDisabled}
@@ -1283,10 +1409,7 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
                     stage: group.id,
                     title,
                     description: "",
-                    projectId:
-                      projectId === "all" || projectId === "none"
-                        ? null
-                        : projectId,
+                    projectId,
                   },
                   `create:${group.id}`,
                 );
@@ -1301,60 +1424,14 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
             />
           ) : null
         }
-        groups={orderedGroups({
-          ...board.settings,
-          groupOrder: optimisticOrder ?? board.settings.groupOrder,
-        })}
         compact={taskLayoutCompact}
-        stage={
-          board.settings.groups.find((group) => group.id === selectedStage)
-            ?.id ??
-          defaultWorkspaceGroup(
-            board.settings.groups,
-            board.settings.defaultStartGroup,
-          )
-        }
         setStage={setSelectedStage}
         t={t}
         theme={props.theme}
         onStage={setStage}
-        onReorder={async (groupOrder, expectedGroupOrder) => {
-          if (mutationPending.current.has("reorder-groups")) {
-            toast.error(t.mutationPending);
-            return false;
-          }
-          setOptimisticOrder(groupOrder);
-          const next = await mutate({
-            action: "reorder-groups",
-            groupOrder,
-            expectedGroupOrder,
-          });
-          setOptimisticOrder(null);
-          if (next)
-            toast.show(t.layoutSaved, { variant: "success", durationMs: 1600 });
-          return !!next;
-        }}
-        onEdit={editGroup}
-        onAdd={() => editGroup(newGroup(board.settings.groups))}
-        deleteReason={deleteReason}
-        onDelete={async (group) => {
-          const reason = deleteReason(group);
-          if (reason) {
-            toast.show(reason, { variant: "warning" });
-            return false;
-          }
-          return !!(await mutate({
-            action: "settings",
-            revision: board.revision,
-            expectedSettings: board.settings,
-            settings: {
-              ...board.settings,
-              groups: board.settings.groups.filter(
-                (item) => item.id !== group.id,
-              ),
-            },
-          }));
-        }}
+        {...(merged
+          ? mergedScope(merged.groups, merged.owner)
+          : groupScope(viewScope))}
         renderCard={(card, showDragHandle) => (
           <TaskItem
             presentation={viewPreferences.mode === "list" ? "row" : "card"}
@@ -1413,20 +1490,39 @@ function HostWorkboard(props: PluginSurfaceProps & { initialPage?: Page }) {
         <GroupEditor
           key={editingGroup.group.id}
           board={board}
+          projectId={editingGroup.projectId}
+          settings={editingGroup.settings}
           group={editingGroup.group}
-          groups={editingGroup.settings.groups}
+          groups={
+            groupConfig(editingGroup.settings, editingGroup.projectId).groups
+          }
           disabled={writesDisabled || groupsPending}
           saving={groupsPending}
           t={t}
           theme={props.theme}
           onClose={() => setEditingGroup(null)}
+          onSaveSettings={async (settings) =>
+            !!(await mutate(
+              {
+                action: "settings",
+                revision: editingGroup.revision,
+                expectedSettings: editingGroup.settings,
+                settings,
+              },
+              "settings:groups",
+            ))
+          }
           onChange={async (groups) =>
             !!(await mutate(
               {
                 action: "settings",
                 revision: editingGroup.revision,
                 expectedSettings: editingGroup.settings,
-                settings: { ...editingGroup.settings, groups },
+                settings: withGroupConfig(
+                  editingGroup.settings,
+                  editingGroup.projectId,
+                  { groups },
+                ),
               },
               "settings:groups",
             ))
@@ -1726,25 +1822,66 @@ function ProjectPicker({
   compact,
 }: {
   board: Board;
-  value: string;
-  setValue(value: string): void;
+  value: readonly string[];
+  setValue(value: string[]): void;
   t: ReturnType<typeof strings>;
   theme: PluginSurfaceProps["theme"];
   compact: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const options = [
-    { id: "all", name: t.allProjects },
-    { id: "none", name: t.unassigned },
-    ...board.projects,
-  ];
+  const options = [{ id: "none", name: t.unassigned }, ...board.projects];
+  const label =
+    value.length === 0
+      ? t.allProjects
+      : value.length === 1
+        ? (options.find((item) => item.id === value[0])?.name ?? t.allProjects)
+        : t.projectsSelected.replace("{count}", String(value.length));
+  const row = (
+    id: string,
+    name: string,
+    checked: boolean,
+    onPress: () => void,
+  ) => (
+    <Pressable
+      accessibilityRole="checkbox"
+      key={id}
+      accessibilityLabel={name}
+      accessibilityState={{ checked }}
+      aria-checked={checked}
+      testID={`workboard-project-option-${id}`}
+      style={({ pressed }) => [
+        styles.menuItem,
+        {
+          backgroundColor: checked
+            ? theme.colors.accent
+            : pressed
+              ? theme.colors.surface2
+              : "transparent",
+        },
+      ]}
+      onPress={onPress}
+    >
+      <Text
+        style={{
+          color: checked
+            ? theme.colors.accentForeground
+            : theme.colors.foreground,
+        }}
+      >
+        {name}
+      </Text>
+      {checked && (
+        <Icon name="Check" size={16} color={theme.colors.accentForeground} />
+      )}
+    </Pressable>
+  );
   return (
     <View
       style={[styles.projectPicker, compact && styles.projectPickerCompact]}
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${t.selectProject}: ${options.find((item) => item.id === value)?.name}`}
+        accessibilityLabel={`${t.selectProject}: ${label}`}
         onPress={() => setOpen(!open)}
         style={({ pressed }) => [
           styles.toolbarButton,
@@ -1765,7 +1902,7 @@ function ProjectPicker({
             { color: theme.colors.foreground },
           ]}
         >
-          {options.find((item) => item.id === value)?.name}
+          {label}
         </Text>
         <View style={styles.fixedIcon}>
           <Icon
@@ -1779,46 +1916,19 @@ function ProjectPicker({
         <Modal open title={t.selectProject} onOpenChange={setOpen}>
           <Modal.Content>
             <ScrollView style={styles.choiceList}>
-              {options.map((option) => (
-                <Pressable
-                  accessibilityRole="button"
-                  key={option.id}
-                  {...toggleButtonState(option.id === value)}
-                  style={({ pressed }) => [
-                    styles.menuItem,
-                    {
-                      backgroundColor:
-                        option.id === value
-                          ? theme.colors.accent
-                          : pressed
-                            ? theme.colors.surface2
-                            : "transparent",
-                    },
-                  ]}
-                  onPress={() => {
-                    setValue(option.id);
-                    setOpen(false);
-                  }}
-                >
-                  <Text
-                    style={{
-                      color:
-                        option.id === value
-                          ? theme.colors.accentForeground
-                          : theme.colors.foreground,
-                    }}
-                  >
-                    {option.name}
-                  </Text>
-                  {option.id === value && (
-                    <Icon
-                      name="Check"
-                      size={16}
-                      color={theme.colors.accentForeground}
-                    />
-                  )}
-                </Pressable>
-              ))}
+              {row("all", t.allProjects, value.length === 0, () => {
+                setValue([]);
+                setOpen(false);
+              })}
+              {options.map((option) =>
+                row(option.id, option.name, value.includes(option.id), () =>
+                  setValue(
+                    value.includes(option.id)
+                      ? value.filter((id) => id !== option.id)
+                      : [...value, option.id],
+                  ),
+                ),
+              )}
             </ScrollView>
           </Modal.Content>
         </Modal>
@@ -2057,16 +2167,26 @@ function StartModal({
   const project = board.projects.find((item) => item.id === projectId);
   const sourceDirectory =
     sourceKind === "project" ? (project?.directory ?? "") : directory.trim();
+  const { groups: targetGroups } = groupConfig(
+    board.settings,
+    mode === "existing"
+      ? (existingCards.find((item) => item.workspaceId === existing)
+          ?.projectId ?? card.projectId)
+      : projectId || card.projectId,
+  );
+  // A selected group is sent as chosen; the server maps it to the workspace's project.
   const targetStage =
     card.binding?.stage ??
     stage ??
-    defaultStartWorkGroup(
-      board.settings.groups,
-      board.settings.defaultStartWorkGroup,
-    );
+    defaultStartWorkGroup(targetGroups, board.settings.defaultStartWorkGroup);
   const hasTarget =
     !!targetStage &&
-    board.settings.groups.some((group) => group.id === targetStage);
+    (!!card.binding ||
+      !!mapStage(
+        targetStage,
+        groupConfig(board.settings, card.projectId).groups,
+        targetGroups,
+      ));
   const valid =
     card.binding ||
     (mode === "existing"
@@ -2228,7 +2348,12 @@ function StartModal({
                         {item.projectName || t.unassigned} ·{" "}
                         {item.stage === "conflict"
                           ? t.conflict
-                          : stageTitle(item.stage, board.settings.groups, t)}
+                          : stageTitle(
+                              item.stage,
+                              groupConfig(board.settings, item.projectId)
+                                .groups,
+                              t,
+                            )}
                       </Text>
                     </Pressable>
                   ))
@@ -2705,7 +2830,7 @@ export function ArchivePage({
                   ? groupTitle(card.archived.group, t)
                   : stageTitle(
                       card.archived?.stage ?? card.stage,
-                      board.settings.groups,
+                      groupConfig(board.settings, card.projectId).groups,
                       t,
                     )}{" "}
                 ·{" "}
@@ -3256,8 +3381,14 @@ export function SettingsPage({
           <GroupSettings
             board={{ ...board, settings }}
             groups={groups}
-            onChange={async (next) =>
-              !!(await persist({ ...settings, groups: next }))
+            onChange={async (next, projectId) =>
+              !!(await persist(
+                withGroupConfig(settings, projectId, { groups: next }),
+              ))
+            }
+            onSaveSettings={async (next) => !!(await persist(next))}
+            onReset={async (projectId) =>
+              !!(await persist(withoutProjectGroups(settings, projectId)))
             }
             disabled={disabled}
             saving={saving}

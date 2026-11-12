@@ -192,6 +192,11 @@ export const groupOrderSchema = z
         message: "Group order cannot contain duplicates",
       });
   });
+export const projectGroupConfigSchema = z.object({
+  groups: groupsSchema,
+  groupOrder: groupOrderSchema,
+});
+export type ProjectGroupConfig = z.infer<typeof projectGroupConfigSchema>;
 const archiveDaysSchema = z.number().int().min(1).max(365);
 const preferences = {
   archiveMappingNeedsReview: z.boolean().default(false),
@@ -212,10 +217,121 @@ export const settingsSchema = z.object({
   priorityStyles: priorityStylesSchema.optional(),
   groups: groupsSchema.default(DEFAULT_GROUPS),
   groupOrder: groupOrderSchema.default([]),
+  // A project without an entry follows the default groups above.
+  projectGroups: z.record(z.string(), projectGroupConfigSchema).default({}),
 });
 export type Settings = z.infer<typeof settingsSchema>;
+type GroupSettings = Pick<Settings, "groups" | "groupOrder" | "projectGroups">;
+export const hasProjectGroups = (
+  settings: Pick<Settings, "projectGroups">,
+  projectId: string | null | undefined,
+): boolean => !!projectId && Object.hasOwn(settings.projectGroups, projectId);
+/** The groups a project uses: its own copy once customized, otherwise the defaults. */
+export function groupConfig(
+  settings: GroupSettings,
+  projectId: string | null | undefined,
+): ProjectGroupConfig {
+  return hasProjectGroups(settings, projectId)
+    ? settings.projectGroups[projectId!]
+    : { groups: settings.groups, groupOrder: settings.groupOrder };
+}
+/** A project's first change copies its inherited groups, leaving the defaults untouched. */
+export function withGroupConfig<T extends GroupSettings>(
+  settings: T,
+  projectId: string | null | undefined,
+  change: Partial<ProjectGroupConfig>,
+): T {
+  if (!projectId) return { ...settings, ...change };
+  return {
+    ...settings,
+    projectGroups: {
+      ...settings.projectGroups,
+      [projectId]: { ...groupConfig(settings, projectId), ...change },
+    },
+  };
+}
+/** Where a group currently lives: null is the defaults, plus any project holding it. */
+export function groupMembers(
+  settings: GroupSettings,
+  groupId: Stage,
+  opened: string | null,
+  projects: readonly string[],
+): Set<string | null> {
+  const scopes = [null, ...projects];
+  const members = new Set(
+    scopes.filter((scope) =>
+      groupConfig(settings, scope).groups.some((item) => item.id === groupId),
+    ),
+  );
+  if (members.size) return members;
+  // A new group starts where it was opened; the defaults reach every project using them.
+  return new Set(
+    opened
+      ? [opened]
+      : scopes.filter((scope) => !hasProjectGroups(settings, scope)),
+  );
+}
+/**
+ * Makes a group live in exactly the given scopes. Only the opened scope and scopes gaining the
+ * group take this version; a project already holding its own copy keeps it unchanged.
+ */
+export function withGroupMembership<T extends GroupSettings>(
+  settings: T,
+  group: Group,
+  opened: string | null,
+  members: ReadonlySet<string | null>,
+  projects: readonly string[],
+): T {
+  const inDefaults = members.has(null);
+  const edited = (scope: string | null) =>
+    scope === opened || (opened === null && !hasProjectGroups(settings, scope));
+  const applied = (scope: string | null, wanted: boolean) => {
+    const { groups } = groupConfig(settings, scope);
+    if (!wanted) return groups.filter((item) => item.id !== group.id);
+    if (!groups.some((item) => item.id === group.id)) return [...groups, group];
+    return edited(scope)
+      ? groups.map((item) => (item.id === group.id ? group : item))
+      : groups;
+  };
+  let next = settings;
+  for (const project of projects) {
+    const wanted = members.has(project);
+    // A project on the defaults needs its own copy only to differ from them.
+    if (
+      hasProjectGroups(settings, project) ||
+      wanted !== inDefaults ||
+      (wanted && project === opened)
+    )
+      next = withGroupConfig(next, project, {
+        groups: applied(project, wanted),
+      });
+  }
+  return withGroupConfig(next, null, { groups: applied(null, inDefaults) });
+}
+export function withoutProjectGroups<T extends GroupSettings>(
+  settings: T,
+  projectId: string,
+): T {
+  const { [projectId]: _removed, ...projectGroups } = settings.projectGroups;
+  return { ...settings, projectGroups };
+}
+export const allGroups = (settings: GroupSettings): Group[] => [
+  ...settings.groups,
+  ...Object.values(settings.projectGroups).flatMap((config) => config.groups),
+];
+/** The same stage in another project's groups, or the first group of the same type. */
+export function mapStage(
+  stage: Stage,
+  from: readonly Group[],
+  to: readonly Group[],
+): Stage | undefined {
+  const kind = groupKind(stage, from);
+  const same = to.find((group) => group.id === stage);
+  if (same && (kind === undefined || same.kind === kind)) return same.id;
+  return to.find((group) => group.kind === kind)?.id;
+}
 export function orderedGroups(
-  settings: Pick<Settings, "groups" | "groupOrder">,
+  settings: Pick<ProjectGroupConfig, "groups" | "groupOrder">,
 ): Group[] {
   const remaining = new Map(settings.groups.map((group) => [group.id, group]));
   const ordered: Group[] = [];
@@ -377,7 +493,7 @@ export function conversationStatusFor(
  * The stored settings version. The plugin registers this same value, because the host only
  * migrates stored settings when the registered version differs from what it finds.
  */
-export const DATA_SCHEMA_VERSION = 13;
+export const DATA_SCHEMA_VERSION = 14;
 
 export const sourceSchema = z.discriminatedUnion("kind", [
   z.object({

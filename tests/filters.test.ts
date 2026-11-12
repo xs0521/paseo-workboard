@@ -6,6 +6,7 @@ import {
   DEFAULT_FILTERS,
   matchesDateRange,
   parseFilters,
+  singleProject,
   type BoardFilters,
 } from "../client/filters";
 
@@ -71,7 +72,7 @@ describe("remembered board filters", () => {
         }),
       ),
     ).toEqual({
-      projectId: "p1",
+      projectIds: ["p1"],
       search: "test",
       attentionOnly: true,
       activity: "running",
@@ -82,12 +83,42 @@ describe("remembered board filters", () => {
       parseFilters(JSON.stringify({ activity: "removed", search: "keep" })),
     ).toEqual({ ...DEFAULT_FILTERS, search: "keep" });
   });
+  it("restores several projects and converts a saved single project", () => {
+    expect(
+      parseFilters(JSON.stringify({ projectIds: ["p1", "none", "p1"] }))
+        .projectIds,
+    ).toEqual(["p1", "none"]);
+    expect(
+      parseFilters(JSON.stringify({ projectId: "all" })).projectIds,
+    ).toEqual([]);
+    expect(
+      parseFilters(JSON.stringify({ projectIds: "p1" })).projectIds,
+    ).toEqual([]);
+    expect(singleProject(["p1"])).toBe("p1");
+    expect(singleProject(["none"])).toBeNull();
+    expect(singleProject(["p1", "p2"])).toBeNull();
+  });
+  it("shows tasks from every selected project", () => {
+    const many = [
+      card("a", { projectId: "a" }),
+      card("b", { projectId: "b" }),
+      card("c", { projectId: "c" }),
+      card("loose"),
+    ];
+    const ids = (selected: string[]) =>
+      visibleCards({ cards: many } as Board, selected, "", false).map(
+        (item) => item.id,
+      );
+    expect(ids(["a", "c"])).toEqual(["a", "c"]);
+    expect(ids(["b", "none"])).toEqual(["b", "loose"]);
+    expect(ids([])).toEqual(["a", "b", "c", "loose"]);
+  });
   it("counts actual conditions without treating whitespace as a filter", () => {
     expect(activeFilterCount({ ...DEFAULT_FILTERS, search: "  " })).toBe(0);
     expect(
       activeFilterCount({
         ...DEFAULT_FILTERS,
-        projectId: "none",
+        projectIds: ["none"],
         activity: "idle",
         changeRequest: "none",
         attentionOnly: true,

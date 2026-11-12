@@ -2,21 +2,39 @@ import { Pressable, Text, View } from "react-native";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { BoardView, type BoardViewProps } from "./BoardView";
 import type { Board } from "../shared/model";
+import { ListView } from "./ListView";
 import { taskSections } from "./project-groups";
 import { design, typography } from "./design";
 
-/** Project lanes, including unassigned tasks, reuse the status columns and drag behavior. */
+export type GroupScopeProps = Pick<
+  BoardViewProps,
+  | "groups"
+  | "stage"
+  | "onReorder"
+  | "onEdit"
+  | "onAdd"
+  | "deleteReason"
+  | "onDelete"
+>;
+
+/** Project sections, including unassigned tasks, reuse the status columns and drag behavior. */
 export function ProjectBoardView(
   props: BoardViewProps & {
     projects: Board["projects"];
     onCreateInProject?(projectId: string | null): void;
     collapsed: ReadonlySet<string>;
     onCollapsedChange(ids: string[]): void;
+    laneCollapsed: ReadonlySet<string>;
+    onLaneCollapsedChange(ids: string[]): void;
+    groupScope(projectId: string | null): GroupScopeProps;
+    list?: boolean;
   },
 ) {
-  const { t, theme, collapsed } = props;
+  const { t, theme, laneCollapsed: collapsed } = props;
+  const Section = props.list ? ListView : BoardView;
   const sections = taskSections({
     ...props,
+    groupsFor: (projectId) => props.groupScope(projectId).groups,
     unassigned: t.unassigned,
   });
   return (
@@ -45,7 +63,7 @@ export function ProjectBoardView(
                     if (fold) next.add(section.id);
                     else next.delete(section.id);
                   }
-                  props.onCollapsedChange([...next]);
+                  props.onLaneCollapsedChange([...next]);
                 }}
                 style={({ pressed }) => ({
                   ...design.control,
@@ -81,12 +99,16 @@ export function ProjectBoardView(
           </Text>
         ) : null}
         {sections.map((section) => {
+          const scope = props.groupScope(section.projectId);
           const largestColumn = Math.max(
             1,
-            ...props.groups.map(
+            ...scope.groups.map(
               (g) => section.cards.filter((c) => c.stage === g.id).length,
             ),
           );
+          const height = props.list
+            ? 140 + scope.groups.length * 48 + section.cards.length * 72
+            : 140 + largestColumn * 280;
           return (
             <View
               key={section.id}
@@ -106,7 +128,7 @@ export function ProjectBoardView(
                   const next = new Set(collapsed);
                   if (next.has(section.id)) next.delete(section.id);
                   else next.add(section.id);
-                  props.onCollapsedChange([...next]);
+                  props.onLaneCollapsedChange([...next]);
                 }}
                 style={{
                   minHeight: 40,
@@ -139,11 +161,10 @@ export function ProjectBoardView(
                 </Text>
               </Pressable>
               {!collapsed.has(section.id) ? (
-                <View
-                  style={{ height: Math.min(700, 140 + largestColumn * 280) }}
-                >
-                  <BoardView
+                <View style={{ height: Math.min(700, height) }}>
+                  <Section
                     {...props}
+                    {...scope}
                     layoutScope={section.id}
                     cards={section.cards}
                     renderQuickCreate={undefined}

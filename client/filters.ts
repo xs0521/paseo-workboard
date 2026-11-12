@@ -22,14 +22,25 @@ export const REQUEST_FILTERS = [
   "unavailable",
 ] as const;
 export const DATE_RANGES = ["any", "today", "3days", "week", "month"] as const;
-const filterSchema = z.object({
-  projectId: z.string().min(1).catch("all"),
-  search: z.string().catch(""),
-  attentionOnly: z.boolean().catch(false),
-  activity: z.enum(ACTIVITY_FILTERS).catch("all"),
-  changeRequest: z.enum(REQUEST_FILTERS).catch("all"),
-  dateRange: z.enum(DATE_RANGES).catch("any"),
-});
+const projectIds = z.array(z.string().min(1)).catch([]);
+const filterSchema = z
+  .object({
+    // Empty selects every project; "none" selects tasks without a project.
+    projectIds: projectIds.optional(),
+    // A single selection saved before several projects could be chosen.
+    projectId: z.string().min(1).optional().catch(undefined),
+    search: z.string().catch(""),
+    attentionOnly: z.boolean().catch(false),
+    activity: z.enum(ACTIVITY_FILTERS).catch("all"),
+    changeRequest: z.enum(REQUEST_FILTERS).catch("all"),
+    dateRange: z.enum(DATE_RANGES).catch("any"),
+  })
+  .transform(({ projectId, projectIds: ids, ...filters }) => ({
+    projectIds: [
+      ...new Set(ids ?? (projectId && projectId !== "all" ? [projectId] : [])),
+    ],
+    ...filters,
+  }));
 export type BoardFilters = z.infer<typeof filterSchema>;
 export const DEFAULT_FILTERS: BoardFilters = filterSchema.parse({});
 export function parseFilters(raw: string | null): BoardFilters {
@@ -39,9 +50,15 @@ export function parseFilters(raw: string | null): BoardFilters {
     return DEFAULT_FILTERS;
   }
 }
+/** The one selected project for new tasks and group edits, or null for none or several. */
+export function singleProject(projectIds: readonly string[]): string | null {
+  return projectIds.length === 1 && projectIds[0] !== "none"
+    ? projectIds[0]
+    : null;
+}
 export function activeFilterCount(filters: BoardFilters): number {
   return [
-    filters.projectId !== "all",
+    filters.projectIds.length > 0,
     !!filters.search.trim(),
     filters.attentionOnly,
     filters.activity !== "all",

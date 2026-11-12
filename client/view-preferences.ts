@@ -15,6 +15,8 @@ export type ViewPreferences = {
   columnLayout?: ColumnLayout;
   collapsedListGroups: string[];
   groupBy?: "status" | "project";
+  // Projects with different groups: one section each, or one board with merged columns.
+  mixedGroups?: "sections" | "merged";
   priorityFirst?: boolean;
   collapsedProjectGroups?: string[];
 };
@@ -42,6 +44,9 @@ export function loadViewPreferencesFrom(
       mode: value.mode === "list" ? "list" : "board",
       ...(value.groupBy === "project" || value.groupBy === "status"
         ? { groupBy: value.groupBy }
+        : {}),
+      ...(value.mixedGroups === "sections" || value.mixedGroups === "merged"
+        ? { mixedGroups: value.mixedGroups }
         : {}),
       priorityFirst:
         typeof value.priorityFirst === "boolean" ? value.priorityFirst : true,

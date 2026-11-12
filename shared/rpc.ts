@@ -96,6 +96,7 @@ export const mutationSchema = z.discriminatedUnion("action", [
   }),
   z.object({
     action: z.literal("reorder-groups"),
+    projectId: z.string().nullable().optional(),
     expectedGroupOrder: groupOrderSchema,
     groupOrder: groupOrderSchema,
   }),

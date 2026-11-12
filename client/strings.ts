@@ -67,7 +67,28 @@ const zh = {
     "这里只创建或关联工作区；进入工作区后再启动 Agent，不会自动发送提示词。",
   search: "搜索任务或项目",
   allProjects: "全部项目",
+  projectsSelected: "{count} 个项目",
   unassigned: "未分配",
+  groupScope: "分组范围",
+  mixedGroups: "多项目分组",
+  mixedGroupsSections: "按项目分段",
+  mixedGroupsMerged: "合并分组",
+  mergedGroupsReorder:
+    "多个项目合并显示时不能调整列顺序，请筛选到单个项目后再调整。",
+  mergedGroupsDelete:
+    "合并显示时不能直接删除，请在编辑分组的「应用到」中取消勾选项目。",
+  groupNotInProject: "这个任务所在的项目没有该分组。",
+  groupApplyTo: "应用到",
+  groupApplyToHint:
+    "勾选的范围包含这个分组，取消勾选会从该范围移除。每个项目保存自己的一份，任务互不影响；修改只写入当前范围和新勾选的项目。",
+  groupScopeRequired: "至少选择一个范围。",
+  defaultGroups: "默认分组",
+  projectGroupsInherited:
+    "正在使用默认分组。修改后，这个项目会有自己的一份分组。",
+  projectGroupsCustom: "这个项目有自己的一份分组。",
+  resetProjectGroups: "恢复默认分组",
+  resetProjectGroupsConfirm:
+    "删除这个项目自己的分组，改回默认分组。分组里还有任务时无法恢复。",
   attention: "只看需关注",
   filters: "筛选",
   allStates: "全部状态",
@@ -581,7 +602,28 @@ const en: typeof zh = {
     "This creates or attaches a workspace. Start an Agent from the workspace; no prompt is sent automatically.",
   search: "Search tasks or projects",
   allProjects: "All projects",
+  projectsSelected: "{count} projects",
   unassigned: "Unassigned",
+  groupScope: "Groups for",
+  mixedGroups: "Project groups",
+  mixedGroupsSections: "Sections by project",
+  mixedGroupsMerged: "Merged groups",
+  mergedGroupsReorder:
+    "Columns from several projects cannot be reordered here. Filter to one project to reorder them.",
+  mergedGroupsDelete:
+    "Merged columns cannot be deleted here. Uncheck projects under Apply to in the group editor.",
+  groupNotInProject: "This task's project does not have that group.",
+  groupApplyTo: "Apply to",
+  groupApplyToHint:
+    "Checked scopes hold this group; unchecking removes it there. Each project keeps its own copy and tasks, and edits reach only the current scope and newly checked projects.",
+  groupScopeRequired: "Select at least one scope.",
+  defaultGroups: "Default groups",
+  projectGroupsInherited:
+    "Uses the default groups. Changing them gives this project its own copy.",
+  projectGroupsCustom: "This project has its own groups.",
+  resetProjectGroups: "Restore default groups",
+  resetProjectGroupsConfirm:
+    "Remove this project's own groups and return to the default groups. Groups that still hold tasks block this.",
   attention: "Needs attention",
   filters: "Filters",
   allStates: "All states",

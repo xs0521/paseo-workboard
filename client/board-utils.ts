@@ -5,6 +5,8 @@ import {
   isArchiveDue,
   defaultGroup,
   defaultWorkspaceGroup,
+  groupConfig,
+  hasProjectGroups,
   groupKind,
   labelKey,
   priorityLabels,
@@ -88,7 +90,8 @@ export function attentionReasons(card: Card): string[] {
 
 export function visibleCards(
   board: Board,
-  projectId: string,
+  // A single string is the legacy form: "all", "none" or one project ID.
+  projects: string | readonly string[],
   search: string,
   attentionOnly: boolean,
   filters: Pick<
@@ -98,14 +101,18 @@ export function visibleCards(
   now: number = Date.now(),
 ): Card[] {
   const needle = search.trim().toLocaleLowerCase();
+  const projectIds =
+    typeof projects !== "string"
+      ? projects
+      : projects === "all"
+        ? []
+        : [projects];
   return board.cards.filter(
     (card) =>
       card.archived?.status !== "archived" &&
       card.archived?.status !== "external" &&
-      (projectId === "all" ||
-        (projectId === "none"
-          ? card.projectId === null
-          : card.projectId === projectId)) &&
+      (projectIds.length === 0 ||
+        projectIds.includes(card.projectId ?? "none")) &&
       (!attentionOnly || attentionReasons(card).length > 0) &&
       (filters.activity === "all" || card.activity === filters.activity) &&
       matchesRequest(card, filters.changeRequest) &&
@@ -220,13 +227,10 @@ export function mappingPreview(
       card.archived?.status === "external"
     )
       continue;
-    const stage = resolveStage(
-      card.labels,
-      settings.groups,
-      settings.defaultStartGroup,
-    );
+    const { groups } = groupConfig(settings, card.projectId);
+    const stage = resolveStage(card.labels, groups, settings.defaultStartGroup);
     if (stage !== card.stage) affected += 1;
-    const kind = groupKind(stage, settings.groups);
+    const kind = groupKind(stage, groups);
     // A scheduled idle recheck may archive right after the rule is enabled, so it belongs in
     // the confirmation; the hint itself never authorizes anything.
     const gate = archiveGate(card);
@@ -273,6 +277,19 @@ export function groupTasks(cards: readonly Card[], group: Group): Card[] {
   );
 }
 
+/** The cards a group edit affects: one project's, or every project on the defaults. */
+export function cardsInGroupScope(
+  cards: readonly Card[],
+  settings: Pick<Settings, "projectGroups">,
+  projectId: string | null,
+): Card[] {
+  return cards.filter((card) =>
+    projectId
+      ? card.projectId === projectId
+      : !hasProjectGroups(settings, card.projectId),
+  );
+}
+
 export function groupDeleteReason(
   cards: readonly Card[],
   groups: readonly Group[],
@@ -283,6 +300,8 @@ export function groupDeleteReason(
       "defaultDraftGroup" | "defaultStartGroup" | "defaultStartWorkGroup"
     >
   >,
+  // Defaults are host-wide, so a project falls back to its next group of that type.
+  project = false,
 ):
   | "groupDeleteNotEmpty"
   | "groupDefaultInUse"
@@ -312,6 +331,7 @@ export function groupDeleteReason(
     if (group.kind === "inbox") return "groupNeedsInbox";
     if (group.kind === "canceled") return "groupNeedsCanceled";
   }
+  if (project) return null;
   if (
     group.id === defaultGroup(groups, defaults?.defaultDraftGroup) ||
     group.id === workspaceDefault ||
